@@ -31,7 +31,10 @@ def checked_checkpoint(path: Path | None, model: str) -> Path:
 
 
 def result(model: str, version: str, raw: Any, request: TileRequest,
-           checkpoint: str | None, device: str, started: float, metadata: dict[str, Any]) -> ModelResult:
+           checkpoint: str | None, device: str, started: float,
+           metadata: dict[str, Any], *,
+           instance_classes: dict[int, Any] | None = None,
+           class_probabilities: dict[int, Any] | None = None) -> ModelResult:
     """Normalize an integer instance map and center crop contextual predictions."""
     labels = np.asarray(raw)
     if labels.ndim == 3:
@@ -68,4 +71,5 @@ def result(model: str, version: str, raw: Any, request: TileRequest,
         border_ratio=request.border_ratio, padding_policy=request.padding_policy,
         input_shape=(expected, expected, 3), output_shape=(request.output_size, request.output_size),
         device=device, checkpoint_id=checkpoint, elapsed_seconds=time.perf_counter() - started,
-        metadata=metadata)
+        metadata=metadata, instance_classes=instance_classes,
+        class_probabilities=class_probabilities)

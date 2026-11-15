@@ -1,40 +1,87 @@
 # Foundation model cell segmentation
 
-This guide covers the single-tile benchmark under `src/model_registry/`. It is
-an inference harness for one 1024-by-1024 field of view at a time. A `0.30`
-border adds 30% of the canonical width and height **on every side**; the input
-is larger and the saved prediction is the centered 1024-by-1024 crop. It does
-not yet implement WSI tiling or provide a quality ranking. Quality metrics
-require a reviewed reference instance mask.
+This guide covers the tile inference harness under `src/model_registry/`. One
+command runs one model on a PNG tile or one coordinate-selected NDPI tile.
+Outputs are stored below `segment_result/<model>/result/<run-id>/` by default.
+A `0.30` border adds 30% of the canonical width and height **on every side**;
+the saved prediction is the centered 1024-by-1024 crop. This is not a
+production validation claim: reviewed whole-cell masks and slide-held-out
+metrics are still required.
+
+## Run a model
+
+From the repository root, run the common command template:
+
+```bash
+python -m src.model_registry.run_foundation_model \
+  --model cellsam --input /path/to/1024x1024.png --device cuda
+```
+
+Replace `cellsam` with `pathosam`, `cellvit`, `cellpose_sam`, or `sam`. The
+`--output` argument is optional; the default run directory is created under
+`segment_result/<model>/result/`. Each run contains `instance_mask.tif`,
+`binary_mask.png`, the model input `input.png`, and a provenance `run.json`.
+Existing run directories are never overwritten.
+
+For PNG tiles, provide the extracted slide resolution with `--mpp` when known.
+For NDPI, MPP is read from slide metadata where available. `--target-mpp`
+supplies the model reference scale. The default CellViT x40 checkpoint uses
+0.25 µm/px; custom CellViT checkpoints and the other models require an explicit
+reference scale. Runs record `scale_unverified` when either scale is unknown.
+Do not compare physical-scale results until both source and model MPP are
+established.
+
+```bash
+python -m src.model_registry.run_foundation_model \
+  --model cellpose_sam --input /path/to/1024x1024.png \
+  --mpp 0.25 --target-mpp 0.50 --device cuda
+```
+
+For an NDPI, pass a level-0 top-left coordinate pair:
+
+```bash
+python -m src.model_registry.run_foundation_model \
+  --model pathosam --input /path/to/slide.ndpi --x 147456 --y 66048 \
+  --level 0 --device cuda
+```
+
+This command assumes the selected model's Python dependencies and a compatible
+PyTorch/CUDA environment are already installed. They are intentionally not
+installed dynamically at inference time: model environments conflict, and
+PLGrid CUDA and system-library setup depends on the selected cluster and job.
+First-party weights are loaded or downloaded by the upstream loader where
+available. SAM's official checkpoint is downloaded to the model cache on its
+first run. CellSAM's official checkpoint service may require a
+`DEEPCELL_ACCESS_TOKEN`; set it in the job environment or pass `--checkpoint`.
+CellViT downloads its official x40 checkpoint on first use; set
+`CELLVIT_CACHE` to choose its persistent cache directory.
 
 ## Models, checkpoints, and licenses
 
 Stable model IDs are `pathosam`, `cellvit`, `cellsam`, `cellpose_sam`, and
-`sam`. See [`../configs/model_registry/foundation_models.yaml`](../configs/model_registry/foundation_models.yaml)
-for upstream repositories, papers, expected checkpoint locations, and
-dependency notes. The adapters have different upstream APIs and environments;
-do not assume one shared set of model dependencies will work for all five.
+See [`../configs/model_registry/foundation_models.yaml`](../configs/model_registry/foundation_models.yaml)
+for upstream revisions, weight sources, licenses, and native output semantics.
+Check terms independently for code, weights, and generated outputs before
+redistribution. `--checkpoint` selects a local checkpoint override;
+`--checkpoint-root` or `MPN_AL_CHECKPOINT_ROOT` selects the SAM download cache.
+Keep weights and source WSIs out of Git.
 
-Before running a model, consult its upstream installation and inference guide,
-pin the repository revision and compatible package versions, obtain the
-checkpoint from its documented source, and record any required license or
-checkpoint terms. Check terms independently for code, weights, and generated
-outputs before distributing any of them. The harness does not download checkpoints. Put each model's checkpoint under
-its directory in `data/06_models/fm_weights/` (for example,
-`data/06_models/fm_weights/pathosam/`). When exactly one supported checkpoint
-file is present in that model directory, it is selected automatically.
-`--checkpoint` selects a particular file when a model has multiple weights.
-Use `--checkpoint-root` or the `MPN_AL_CHECKPOINT_ROOT` environment variable
-when weights are stored elsewhere; the root must contain per-model
-subdirectories named after the stable model IDs. Keep weights and source WSIs
-out of Git.
+PathoSAM uses the upstream `vit_b_histopathology` loader and its built-in
+weights by default. Cellpose uses the upstream `cpsam_v2` weights and downloads
+them on first use. CellSAM uses the official `cellsam_general` v1.2 loader;
+its authenticated download may require a DeepCell access token. SAM downloads
+the selected official Meta checkpoint into the shared cache. CellViT's adapter
+downloads the official CellViT-SAM-H x40 checkpoint by default. These pretrained
+weights have not been validated against the project's marrow whole-cell
+annotations; PathoSAM and CellViT are nucleus-oriented, and vanilla SAM is a
+generic proposal baseline.
 
-PathoSAM is the exception to the local-checkpoint requirement: by default, the
-adapter uses the upstream `vit_b_histopathology` model and lets `micro_sam`
-retrieve/cache its built-in weights. No `pathosam` checkpoint directory is
-needed. Pass `--checkpoint` only when intentionally using a custom checkpoint;
-the other built-in model variants can be selected with
-`--param model_type=vit_l_histopathology` or `--param model_type=vit_h_histopathology`.
+The project has no frozen marrow cell taxonomy or reviewed per-instance
+training set yet, so this implementation does not invent or train a disease
+classifier. CellViT's native PanNuke predictions are preserved as
+`instances.json` when returned, but they are nucleus labels and are not remapped
+to MPN categories. Other adapters only write `instances.json` if their native
+inference result supplies instance-aligned classes or probabilities.
 
 ## Windows 11 with WSL2
 
@@ -129,12 +176,15 @@ python -m src.model_registry.run_foundation_model \
   --output data/03_predictions/foundation_model_runs/pathosam-no-border
 ```
 
-For other models, install that adapter's pinned dependencies and place one
-checkpoint file in its model directory. The default root is resolved from the
-repository location, so it works regardless of the current working directory.
-Set `MPN_AL_CHECKPOINT_ROOT` or pass `--checkpoint-root` to use a different
-local or cluster path. Create a new output directory for every run because
-existing directories are never overwritten:
+Install the selected adapter's dependencies according to its upstream
+instructions. PathoSAM, Cellpose, and SAM use their first-party default
+checkpoints when no `--checkpoint` is supplied. CellSAM's default model may
+require an access token; CellViT downloads its x40 checkpoint through the
+official cache helper. To use a local override, pass
+`--checkpoint /path/to/checkpoint`. `--checkpoint-root` or
+`MPN_AL_CHECKPOINT_ROOT` selects the SAM cache; `CELLVIT_CACHE` selects the
+CellViT cache. Create a new output directory for every run because existing
+run directories are never overwritten:
 
 ```bash
 python -m src.model_registry.run_foundation_model \
@@ -144,17 +194,14 @@ python -m src.model_registry.run_foundation_model \
   --output data/03_predictions/foundation_model_runs/pathosam-border-030
 ```
 
-For PLGrid, PathoSAM can likewise use the built-in model without a checkpoint.
-For other models, either pass the explicit `--checkpoint` file path as shown
-in the batch templates, or set `MPN_AL_CHECKPOINT_ROOT` to a storage path
-containing the same per-model subdirectories. For automatic selection, each
-other model's subdirectory must contain exactly one supported checkpoint
-file; use `--checkpoint` when it contains multiple files. For example:
+For PLGrid, store model caches on project or durable storage when possible.
+Set the relevant cache location before running:
 
 ```bash
 export MPN_AL_CHECKPOINT_ROOT=/path/to/project/fm_weights
+export CELLVIT_CACHE=/path/to/project/cellvit_cache
 python -m src.model_registry.run_foundation_model \
-  --model pathosam --input "$INPUT" --device cuda --output "$OUT"
+  --model cellpose_sam --input "$INPUT" --device cuda
 ```
 
 For `.ndpi`, provide both level-0 `--x` and `--y`; coordinates are top-left
@@ -197,9 +244,11 @@ site- and grant-dependent.
    when logging in or transferring data as instructed by the current portal
    and system guide.
 2. Clone the repository into a project or user work directory on the cluster.
-   Stage only the fixture or the required source WSI region and the checkpoint
-   needed for the run. Use the system's scratch area for temporary caches and
-   temporary model files; use project/durable storage for completed run
+   Stage only the required source tile or WSI region. Official weights are
+   downloaded on first use where their upstream loader supports it; ensure
+   outbound network access or pre-populate that loader's cache. Use the
+   system's scratch area for temporary caches and temporary model files; use
+   project/durable storage for completed run
    directories and logs. Check the local storage guide for quotas, purge
    policies, and valid paths.
 3. Use a site-supported Apptainer/Singularity image when available, or load the
@@ -216,9 +265,9 @@ site- and grant-dependent.
 ### ARES batch template
 
 Save as `run_pathosam_ares.sbatch`. Confirm the partition, GPU syntax, account,
-memory, and time limits for ARES before use. Set `REPO`, `INPUT`, `CHECKPOINT`,
-and `OUT` to paths visible on the compute node. Create `OUT`'s parent and the
-log directory on persistent storage before submitting.
+memory, and time limits for ARES before use. Set `REPO`, `INPUT`, and the log
+directory to paths visible on the compute node. Official PathoSAM weights are
+loaded by its upstream model loader.
 
 ```bash
 #!/usr/bin/env bash
@@ -235,16 +284,13 @@ log directory on persistent storage before submitting.
 set -euo pipefail
 REPO=<absolute-repository-path>
 INPUT=<absolute-input-png-or-ndpi-path>
-CHECKPOINT=<absolute-checkpoint-path>
-OUT=<new-unique-output-directory>
 cd "$REPO"
 # Use the exact modules/container and environment documented for this ARES setup.
 # module load <site-approved-python-and-cuda-modules>
 source <venv-path>/bin/activate
-mkdir -p "$(dirname "$OUT")"
 python -m src.model_registry.run_foundation_model \
-  --model pathosam --input "$INPUT" --checkpoint "$CHECKPOINT" \
-  --device cuda --seed 0 --border none --output "$OUT"
+  --model pathosam --input "$INPUT" \
+  --device cuda --seed 0 --border none
 ```
 
 Submit with `sbatch run_pathosam_ares.sbatch`. For `.ndpi`, append `--x <level-0-x>
@@ -281,16 +327,13 @@ inference job; start small and adjust from observed usage.
 set -euo pipefail
 REPO=<absolute-repository-path>
 INPUT=<absolute-input-png-or-ndpi-path>
-CHECKPOINT=<absolute-checkpoint-path>
-OUT=<new-unique-output-directory>
 cd "$REPO"
 # Load only module names listed by the current ATHENA documentation/site query.
 # module load <site-approved-python-and-cuda-modules>
 source <venv-path>/bin/activate
-mkdir -p "$(dirname "$OUT")"
 python -m src.model_registry.run_foundation_model \
-  --model pathosam --input "$INPUT" --checkpoint "$CHECKPOINT" \
-  --device cuda --seed 0 --border 0.30 --output "$OUT"
+  --model pathosam --input "$INPUT" \
+  --device cuda --seed 0 --border 0.30
 ```
 
 Run with `sbatch run_pathosam_athena.sbatch`. The interactive equivalent is:

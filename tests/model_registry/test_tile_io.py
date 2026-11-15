@@ -47,3 +47,12 @@ def test_metadata_is_deterministic(tmp_path):
     second = extract_tile(request)
     assert first.metadata.to_dict() == second.metadata.to_dict()
     assert first.image.tobytes() == second.image.tobytes()
+
+
+def test_png_metadata_keeps_user_supplied_mpp(tmp_path):
+    path = tmp_path / "image.png"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(path)
+
+    tile = extract_tile(TileRequest(path, "image", output_size=4, mpp=0.25))
+
+    assert tile.metadata.mpp == 0.25

@@ -54,7 +54,7 @@ def test_pathosam_calls_upstream_with_builtin_weights():
         "batch_size": 1,
     }
     assert result.instance_mask.shape == (8, 8)
-    assert result.checkpoint_id is None
+    assert result.checkpoint_id == "micro_sam:vit_b_histopathology"
     assert result.metadata["weights"] == "PathoSAM built-in weights"
 
 
@@ -115,3 +115,59 @@ def test_png_directory_runs_each_tile_with_filename_coordinates(tmp_path):
     with Image.open(run_dirs[0] / "input.png") as image:
         assert image.size == (1024, 1024)
         assert image.getpixel((0, 0)) == (10, 20, 30)
+
+
+def test_default_output_is_grouped_by_model(tmp_path, monkeypatch):
+    input_path = tmp_path / "tile.png"
+    Image.new("RGB", (1024, 1024), (10, 20, 30)).save(input_path)
+    monkeypatch.chdir(tmp_path)
+    args = _parser().parse_args([
+        "--model", "sam", "--input", str(input_path), "--dry-run",
+    ])
+
+    destination = run(args)
+
+    assert destination.parent == tmp_path / "segment_result" / "sam" / "result"
+    assert (destination / "instance_mask.tif").is_file()
+    assert (destination / "run.json").is_file()
+
+
+def test_native_instance_classes_are_serialized(tmp_path, monkeypatch):
+    import numpy as np
+
+    from model_registry.base import ModelResult
+    import model_registry.run_foundation_model as runner
+
+    input_path = tmp_path / "tile.png"
+    Image.new("RGB", (1024, 1024), (10, 20, 30)).save(input_path)
+    monkeypatch.chdir(tmp_path)
+
+    class Adapter:
+        def predict(self, tile, request):
+            return np.zeros((request.output_size, request.output_size), dtype=np.int32)
+
+        def postprocess(self, raw, request):
+            labels = np.zeros((request.output_size, request.output_size), dtype=np.int32)
+            labels[1, 1] = 4
+            return ModelResult(
+                labels, (labels > 0).astype(np.uint8), "cellsam", "test",
+                output_size=request.output_size, instance_classes={4: "unknown"},
+                class_probabilities={4: {"unknown": 1.0}},
+            )
+
+    monkeypatch.setattr(runner, "_create_adapter", lambda *_args: Adapter())
+    args = _parser().parse_args(["--model", "cellsam", "--input", str(input_path)])
+
+    destination = run(args)
+
+    instance_metadata = json.loads(
+        (destination / "instances.json").read_text(encoding="utf-8")
+    )
+    run_metadata = json.loads((destination / "run.json").read_text(encoding="utf-8"))
+    assert instance_metadata["instances"] == [{
+        "instance_id": 4,
+        "predicted_class": "unknown",
+        "class_probabilities": {"unknown": 1.0},
+    }]
+    assert run_metadata["validation"]["status"] == "not_assessed"
+    assert "scale_unverified" in run_metadata["inference"]["warnings"][0]

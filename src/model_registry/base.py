@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,6 +34,7 @@ class TileRequest:
     y: int | None = None
     output_size: int = 1024
     border_ratio: float = 0.0
+    mpp: float | None = None
     padding_policy: str = "reflect"
     tile_id: str | None = None
     prep_id: str | None = None
@@ -51,6 +53,8 @@ class TileRequest:
             raise ValueError("output_size must be positive")
         if self.border_ratio < 0:
             raise ValueError("border_ratio must be non-negative")
+        if self.mpp is not None and (not math.isfinite(self.mpp) or self.mpp <= 0):
+            raise ValueError("mpp must be a finite positive value")
         if self.padding_policy not in {"reflect", "edge", "constant"}:
             raise ValueError("padding_policy must be reflect, edge, or constant")
         if self.input_path.suffix.lower() not in SUPPORTED_INPUT_FORMATS:
@@ -75,6 +79,11 @@ class ModelResult:
     y: int | None = None
     output_size: int = 1024
     border_ratio: float = 0.0
+    source_mpp: float | None = None
+    reference_mpp: float | None = None
+    scale_factor: float | None = None
+    instance_classes: Mapping[int, Any] | None = None
+    class_probabilities: Mapping[int, Any] | None = None
     padding_policy: str = "reflect"
     confidence: Any | None = None
     scores: Any | None = None

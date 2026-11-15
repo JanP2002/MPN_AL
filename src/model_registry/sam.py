@@ -5,16 +5,26 @@ are returned as separate instances; merged semantic regions fail validation.
 """
 from __future__ import annotations
 import time
+import os
 from pathlib import Path
 from typing import Any
 from .base import ModelAdapter, TileRequest
 from ._adapter_utils import checked_checkpoint, result, rgb_array
+from ._checkpoint_download import download_sam_checkpoint
 
 class SAMAdapter(ModelAdapter):
     model_name="sam"; version="1.0"
-    def __init__(self,*,model_type:str="vit_b",points_per_side:int=32,pred_iou_thresh:float=.88,stability_score_thresh:float=.95): self.model_type=model_type; self.points_per_side=points_per_side; self.pred_iou_thresh=pred_iou_thresh; self.stability_score_thresh=stability_score_thresh; self._generator=None; self._checkpoint=None; self._device="cpu"
+    def __init__(self,*,model_type:str="vit_b",points_per_side:int=32,pred_iou_thresh:float=.88,stability_score_thresh:float=.95,checkpoint_root:Path|None=None): self.model_type=model_type; self.points_per_side=points_per_side; self.pred_iou_thresh=pred_iou_thresh; self.stability_score_thresh=stability_score_thresh; self.checkpoint_root=checkpoint_root; self._generator=None; self._checkpoint=None; self._device="cpu"
     def load(self,checkpoint_path:Path|None=None,*,device:str="cpu")->None:
-        self._checkpoint=checked_checkpoint(checkpoint_path,self.model_name); self._device=device
+        if checkpoint_path is not None:
+            self._checkpoint=checked_checkpoint(checkpoint_path,self.model_name)
+        else:
+            root = Path(self.checkpoint_root or os.environ.get(
+                "MPN_AL_CHECKPOINT_ROOT",
+                str(Path(__file__).resolve().parents[2] / "data" / "06_models" / "fm_weights"),
+            )).expanduser()
+            self._checkpoint=download_sam_checkpoint(self.model_type,root)
+        self._device=device
         try: from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
         except ImportError as exc: raise RuntimeError("SAM dependencies are missing. Install the pinned segment-anything release.") from exc
         try:
@@ -32,4 +42,4 @@ class SAMAdapter(ModelAdapter):
         return output
     def postprocess(self,raw_output:Any,request:TileRequest):
         start=time.perf_counter()
-        return result(self.model_name,self.version,raw_output,request,str(self._checkpoint),self._device,start,{"prompt_strategy":"automatic mask generator","model_type":self.model_type,"points_per_side":self.points_per_side,"pred_iou_thresh":self.pred_iou_thresh,"stability_score_thresh":self.stability_score_thresh,"limitation":"general SAM masks can merge adjacent cells; validate cell-instance behavior","postprocessing":"mask instances; nearest-neighbor resize; center crop context"})
+        return result(self.model_name,self.version,raw_output,request,str(self._checkpoint),self._device,start,{"upstream":"facebookresearch/segment-anything","upstream_revision":"dca509fe793f601edb92606367a655c15ac00fdf","prompt_strategy":"automatic mask generator","model_type":self.model_type,"checkpoint_source":"official Meta checkpoint URL unless overridden","points_per_side":self.points_per_side,"pred_iou_thresh":self.pred_iou_thresh,"stability_score_thresh":self.stability_score_thresh,"cell_scope":"generic object proposals; not a cell-specific or whole-cell model","whole_cell_validated":False,"limitation":"general SAM masks can merge cells; validate cell-instance behavior","postprocessing":"mask instances; nearest-neighbor resize; center crop context"})

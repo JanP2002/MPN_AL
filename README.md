@@ -9,6 +9,18 @@ scripts/init_data_dirs.sh
 ```
 
 Per-step storage and IDs: [docs/architecture/data-layout.md](docs/architecture/data-layout.md).
+Foundation-model tile inference: [docs/model-registry.md](docs/model-registry.md).
+
+Run a model on one PNG tile with the same command template for each adapter:
+
+```bash
+python -m src.model_registry.run_foundation_model \
+  --model cellpose_sam --input /path/to/1024x1024.png --device cuda
+```
+
+By default, each run is saved under `segment_result/<model>/result/`. See the
+model guide for first-run weight behavior, PLGrid requirements, and physical
+scale options.
 
 ## Repository structure
 

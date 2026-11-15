@@ -134,12 +134,14 @@ def extract_tile(request: TileRequest) -> Tile:
         downsample = 1.0
         if request.level != 0:
             raise ValueError("PNG inputs only support level=0")
-        mpp = None
+        mpp = request.mpp
     else:
         if request.level >= len(downsamples):
             raise ValueError(f"level {request.level} is unavailable; slide has {len(downsamples)} levels")
         dimensions = source.level_dimensions[request.level]
         downsample = float(downsamples[request.level])
+        if request.mpp is not None:
+            mpp = request.mpp
     size = request.output_size
     extra = border_pixels(size, request.border_ratio)
     wanted = size + 2 * extra

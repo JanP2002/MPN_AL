@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 defaults:
   output_size: 1024
   device: auto
@@ -8,57 +8,84 @@ defaults:
     ratio_semantics: per_side
     padding_policy: reflect
   checkpoint_root: data/06_models/fm_weights
+  result_root: segment_result
+  scale_policy:
+    source_mpp: infer_from_wsi_metadata_or_require_cli_for_png
+    unknown_scale: warn_and_record_scale_unverified
+    label_interpolation: nearest
+    rgb_downsample_interpolation: box
+    rgb_upsample_interpolation: bilinear
 
-# Stable IDs are the only IDs used by contracts and results. Friendly aliases
-# should be handled by run_foundation_model.py when that dispatcher is added.
+# Stable IDs are the IDs used by contracts and results.
 models:
   pathosam:
     aliases: [patho-sam]
     upstream: https://github.com/computational-cell-analytics/patho-sam
+    upstream_revision: 4b6b4fe32f7fc6b0b314c270f4b1f8ca1bcc3a64
     paper: https://arxiv.org/abs/2502.00408
-    checkpoint: data/06_models/fm_weights/pathosam/
-    checkpoint_source: Built-in models are retrieved by micro_sam; custom checkpoints are optional.
-    license: Verify code, checkpoint, and output terms at upstream source.
+    checkpoint: built_in_micro_sam_vit_b_histopathology
+    checkpoint_source: Official loader; cached automatically by micro_sam
+    license: Verify code, checkpoint, and output terms at upstream source
+    native_output: generic/nucleus masks; not verified whole-cell
+    whole_cell_validated: false
+    reference_mpp: null
     device: cuda
     parameters: {model_type: vit_b_histopathology, threshold: null, model_native_size: null}
     dependency_constraints: {torch: model-specific, optional_packages: model-specific}
   cellvit:
     aliases: [cellvit++]
     upstream: https://github.com/TIO-IKIM/CellViT-plus-plus
+    inference_upstream: https://github.com/TIO-IKIM/CellViT-Inference
+    upstream_revision: 67cd98e72865520df8b8fd6e2141e1a8c5234a25
     paper: https://pubmed.ncbi.nlm.nih.gov/41576779/
-    checkpoint: data/06_models/fm_weights/cellvit/
-    checkpoint_source: See upstream release; no automatic download.
-    license: Verify code, checkpoint, and output terms at upstream source.
+    checkpoint: CellViT-SAM-H-x40-AMP.pth
+    checkpoint_source: Official CellViT-Inference cache helper downloads from Zenodo
+    license: Verify code, checkpoint, and output terms at upstream source
+    native_output: nucleus instances and dataset-specific nucleus classes
+    whole_cell_validated: false
+    reference_mpp: 0.25
     device: cuda
-    parameters: {threshold: null, model_native_size: null, magnification: null, mpp: null}
+    parameters: {threshold: null, model_native_size: null, magnification: 40, mpp: 0.25}
     dependency_constraints: {torch: model-specific, optional_packages: model-specific}
   cellsam:
     aliases: [cell-sam]
     upstream: https://github.com/vanvalenlab/cellsam
+    upstream_revision: 362a8e521bcd7313d5cb280bcd4cfc12977c1e9f
     paper: https://doi.org/10.1038/s41592-025-02879-w
-    checkpoint: data/06_models/fm_weights/cellsam/
-    checkpoint_source: See upstream release; no automatic download.
-    license: Verify code, checkpoint, and output terms at upstream source.
+    checkpoint: cellsam_general_v1.2
+    checkpoint_source: Official loader downloads and verifies its MD5; DeepCell access token may be required
+    license: Apache-2.0 code; review separate model/data terms at upstream source
+    native_output: cell instances; marrow whole-cell masks not validated
+    whole_cell_validated: false
+    reference_mpp: null
     device: cuda
-    parameters: {threshold: null, model_native_size: null}
+    parameters: {model_variant: cellsam_general, version: "1.2", threshold: null, model_native_size: null}
     dependency_constraints: {torch: model-specific, optional_packages: model-specific}
   cellpose_sam:
     aliases: [cellpose-sam]
     upstream: https://github.com/MouseLand/cellpose
+    upstream_revision: a54cb48849b7e225a81e8e43dcb042d42427f543
     paper: https://www.biorxiv.org/content/10.1101/2025.04.28.651001v1
-    checkpoint: data/06_models/fm_weights/cellpose_sam/
-    checkpoint_source: See upstream release; no automatic download.
-    license: Verify code, checkpoint, and output terms at upstream source.
+    checkpoint: cpsam_v2
+    checkpoint_source: Official Cellpose built-in model loader downloads weights on first use
+    license: Cellpose model training data is CC-BY-NC; review upstream terms
+    native_output: cell/nucleus instances; marrow whole-cell masks not validated
+    whole_cell_validated: false
+    reference_mpp: null
     device: cuda
-    parameters: {diameter: null, flow_threshold: null, cellprob_threshold: null}
+    parameters: {diameter: null, pretrained_model: cpsam_v2, flow_threshold: 0.4, cellprob_threshold: 0.0}
     dependency_constraints: {torch: model-specific, optional_packages: model-specific}
   sam:
     aliases: [segment-anything]
     upstream: https://github.com/facebookresearch/segment-anything
+    upstream_revision: dca509fe793f601edb92606367a655c15ac00fdf
     paper: https://arxiv.org/abs/2304.02643
-    checkpoint: data/06_models/fm_weights/sam/
-    checkpoint_source: See upstream release; no automatic download.
-    license: Verify code, checkpoint, and output terms at upstream source.
+    checkpoint: official_vit_b
+    checkpoint_source: Official Meta URL downloaded on first use; SHA-256 recorded per run
+    license: Apache-2.0
+    native_output: generic object proposals, not cell-specific
+    whole_cell_validated: false
+    reference_mpp: null
     device: cuda
-    parameters: {model_type: vit_h, prompt_strategy: null, mask_threshold: null}
+    parameters: {model_type: vit_b, prompt_strategy: automatic_mask_generator, mask_threshold: null}
     dependency_constraints: {torch: model-specific, optional_packages: model-specific}

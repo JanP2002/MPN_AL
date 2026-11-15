@@ -2,14 +2,13 @@
 
 Example::
 
-    python -m src.model_registry.run_foundation_model --model pathosam \
-        --input tile.png --output data/03_predictions/foundation_model_runs
+    python -m src.model_registry.run_foundation_model --model cellsam \
+        --input tile.png
 
     python -m src.model_registry.run_foundation_model --model pathosam \
         --input src/model_registry/test_data/tiles \
-        --output data/03_predictions/foundation_model_runs
 
-The dispatcher owns I/O and provenance only; model behavior stays in adapters.
+Results are written under ``segment_result/<model>/result/`` by default.
 """
 from __future__ import annotations
 
@@ -31,6 +30,7 @@ import numpy as np
 from PIL import Image
 
 from .base import SUPPORTED_MODELS, ModelResult, TileRequest
+from ._scale import prepare_model_input, restore_model_result
 from .tile_io import extract_tile
 
 
@@ -65,7 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", type=Path,
                         help="source .png/.ndpi file or a directory of named PNG tiles")
     parser.add_argument("--output", type=Path,
-                        help="run directory, or parent directory under which a unique run is created")
+                        help="run directory for one tile; batch input uses it as the parent directory")
     parser.add_argument("--run-id", help="explicit run directory name (never overwrites)")
     parser.add_argument("--x", type=int, help="level-0 x coordinate of canonical tile top-left")
     parser.add_argument("--y", type=int, help="level-0 y coordinate of canonical tile top-left")
@@ -74,11 +74,15 @@ def _parser() -> argparse.ArgumentParser:
                         help="context added on each side of the canonical tile")
     parser.add_argument("--padding", choices=("reflect", "edge", "constant"), default="reflect")
     parser.add_argument("--checkpoint", type=Path,
-                        help="specific model checkpoint; overrides checkpoint-root discovery")
+                        help="use a specific compatible local model checkpoint")
     parser.add_argument("--checkpoint-root", type=Path,
-                        help="directory with one subdirectory per model (default: "
+                        help="cache root for auto-downloaded SAM weights (default: "
                              "MPN_AL_CHECKPOINT_ROOT or data/06_models/fm_weights)")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--mpp", type=float,
+                        help="source microns-per-pixel (required for physical scale normalization of PNG tiles)")
+    parser.add_argument("--target-mpp", type=float,
+                        help="override model reference microns-per-pixel; defaults to a verified model setting when available")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tile-id", help="optional stable tile_id; defaults to source and coordinates")
     parser.add_argument("--image-id", help="optional image/slide ID; defaults to input stem")
@@ -215,6 +219,8 @@ def _create_adapter(args: argparse.Namespace, device: str,
     unknown = sorted(set(overrides) - set(accepted))
     if unknown:
         raise ValueError(f"unsupported override(s) for {args.model}: {', '.join(unknown)}")
+    if args.model == "sam" and getattr(args, "checkpoint_root", None) is not None:
+        overrides = {**overrides, "checkpoint_root": args.checkpoint_root}
     adapter = adapter_cls(**overrides)
     import random
     random.seed(args.seed)
@@ -226,12 +232,9 @@ def _create_adapter(args: argparse.Namespace, device: str,
             torch.cuda.manual_seed_all(args.seed)
     except ImportError:
         pass
-    if args.model == "pathosam" and args.checkpoint is None:
-        args.checkpoint = None
-    else:
-        args.checkpoint = _resolve_checkpoint(
-            args.model, args.checkpoint, getattr(args, "checkpoint_root", None)
-        )
+    checkpoint_root = getattr(args, "checkpoint_root", None)
+    if args.checkpoint is not None:
+        args.checkpoint = _resolve_checkpoint(args.model, args.checkpoint, checkpoint_root)
     adapter.load(args.checkpoint, device=device)
     return adapter
 
@@ -253,6 +256,8 @@ def run(args: argparse.Namespace) -> Path | list[Path]:
         raise ValueError("--model and --input are required (unless --list-models is used)")
     if (args.x is None) != (args.y is None):
         raise ValueError("--x and --y must be supplied together")
+    if args.target_mpp is not None and (not np.isfinite(args.target_mpp) or args.target_mpp <= 0):
+        raise ValueError("--target-mpp must be a finite positive value")
     args.input = args.input.expanduser().resolve()
     if args.input.is_dir():
         if args.x is not None:
@@ -296,15 +301,18 @@ def _run_file(args: argparse.Namespace, *, batch_output: bool = False,
     overrides = _parse_overrides(args.param)
     request = TileRequest(input_path=args.input, image_id=args.image_id or args.input.stem,
         level=args.level, x=args.x, y=args.y, border_ratio=0 if args.border == "none" else 0.30,
+        mpp=args.mpp,
         padding_policy=args.padding, tile_id=args.tile_id)
     extraction_request = request
     if batch_output:
         extraction_request = TileRequest(
             input_path=request.input_path, image_id=request.image_id, level=request.level,
             output_size=request.output_size, border_ratio=request.border_ratio,
-            padding_policy=request.padding_policy, tile_id=request.tile_id,
+            mpp=request.mpp, padding_policy=request.padding_policy, tile_id=request.tile_id,
         )
     tile = extract_tile(extraction_request)
+    source_mpp = tile.metadata.mpp
+    reference_mpp = args.target_mpp
     if batch_output and request.x is not None and request.y is not None:
         border = tile.metadata.border_pixels
         tile.metadata.x, tile.metadata.y = request.x, request.y
@@ -324,12 +332,12 @@ def _run_file(args: argparse.Namespace, *, batch_output: bool = False,
     if Path(run_id).name != run_id or run_id in {".", ".."}:
         raise ValueError("--run-id must be a single safe directory name")
     if batch_output:
-        parent = (args.output or Path("data/03_predictions/foundation_model_runs")).expanduser()
+        parent = (args.output or Path("segment_result") / args.model / "result").expanduser()
         destination = parent / run_id
     elif args.output is not None and args.run_id is None:
         destination = args.output.expanduser()
     else:
-        parent = (args.output or Path("data/03_predictions/foundation_model_runs")).expanduser()
+        parent = (args.output or Path("segment_result") / args.model / "result").expanduser()
         destination = parent / run_id
     destination = destination.resolve()
     if destination.exists():
@@ -346,12 +354,32 @@ def _run_file(args: argparse.Namespace, *, batch_output: bool = False,
             border_ratio=request.border_ratio, padding_policy=request.padding_policy,
             input_shape=tile.metadata.input_shape, output_shape=(request.output_size, request.output_size),
             device=device, elapsed_seconds=0.0, warnings=["dry-run: no model inference performed"],
+            source_mpp=source_mpp, reference_mpp=reference_mpp,
             metadata={"dry_run": True})
     else:
         if adapter is None:
             adapter = _create_adapter(args, device, overrides)
-        raw = adapter.predict(tile.image, request)
-        result_obj = adapter.postprocess(raw, request)
+        if args.target_mpp is None:
+            reference_mpp = getattr(adapter, "reference_mpp", None)
+        model_tile, model_request, scale, scale_warning = prepare_model_input(
+            tile.image, request, source_mpp=source_mpp, reference_mpp=reference_mpp,
+        )
+        inference_started = time.perf_counter()
+        raw = adapter.predict(model_tile, model_request)
+        result_obj = adapter.postprocess(raw, model_request)
+        result_obj = restore_model_result(
+            result_obj, request, source_mpp=source_mpp,
+            reference_mpp=reference_mpp, scale=scale,
+            input_shape=tile.metadata.input_shape,
+        )
+        result_obj.elapsed_seconds = time.perf_counter() - inference_started
+        if scale_warning:
+            result_obj.warnings.append(scale_warning)
+        if result_obj.metadata.get("whole_cell_validated") is False:
+            result_obj.warnings.append(
+                "whole_cell_unvalidated: model output has not been validated "
+                "against reviewed marrow whole-cell annotations"
+            )
         if result_obj.model_name != args.model:
             raise ValueError(f"adapter returned model_name={result_obj.model_name!r}; expected {args.model!r}")
 
@@ -365,8 +393,33 @@ def _run_file(args: argparse.Namespace, *, batch_output: bool = False,
     tile.image.save(destination / "input.png", format="PNG")
     _save_mask(destination / "instance_mask.tif", result_obj.instance_mask, instance=True)
     _save_mask(destination / "binary_mask.png", result_obj.binary_mask, instance=False)
+    instance_metadata_path = None
+    if result_obj.instance_classes or result_obj.class_probabilities:
+        class_ids = set(result_obj.instance_classes or {}) | set(result_obj.class_probabilities or {})
+        instance_metadata_path = destination / "instances.json"
+        instance_metadata_path.write_text(
+            json.dumps(_jsonable({
+                "schema_version": 1,
+                "taxonomy": None,
+                "model": args.model,
+                "instances": [
+                    {
+                        "instance_id": int(instance_id),
+                        "predicted_class": (result_obj.instance_classes or {}).get(instance_id),
+                        "class_probabilities": (result_obj.class_probabilities or {}).get(instance_id),
+                    }
+                    for instance_id in sorted(class_ids)
+                ],
+            }), indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     result_obj.tile_id = request.tile_id or f"{request.image_id}_L{request.level}_x{tile.metadata.x}_y{tile.metadata.y}"
+    checkpoint_path = args.checkpoint
+    if checkpoint_path is None and result_obj.checkpoint_id:
+        possible_path = Path(result_obj.checkpoint_id).expanduser()
+        if possible_path.is_file():
+            checkpoint_path = possible_path.resolve()
     metadata = {
         "schema_version": 1, "run_id": run_id, "model": args.model,
         "adapter_version": result_obj.adapter_version, "dry_run": bool(args.dry_run),
@@ -376,21 +429,42 @@ def _run_file(args: argparse.Namespace, *, batch_output: bool = False,
         "request": {"level": request.level, "x": tile.metadata.x, "y": tile.metadata.y,
                     "output_size": request.output_size, "border_ratio": request.border_ratio,
                     "border_semantics": "per_side", "padding_policy": request.padding_policy},
-        "inference": {"device": device, "checkpoint": str(args.checkpoint.resolve()) if args.checkpoint else None,
-                      "checkpoint_sha256": _sha256(args.checkpoint.resolve()) if args.checkpoint and args.checkpoint.is_file() else None,
+        "inference": {"device": device,
+                      "checkpoint": str(checkpoint_path) if checkpoint_path else result_obj.checkpoint_id,
+                      "checkpoint_sha256": _sha256(checkpoint_path) if checkpoint_path and checkpoint_path.is_file() else None,
                       "seed": args.seed, "model_overrides": overrides,
+                      "source_mpp": result_obj.source_mpp,
+                      "reference_mpp": result_obj.reference_mpp,
+                      "scale_factor": result_obj.scale_factor,
                       "elapsed_seconds": result_obj.elapsed_seconds,
                       "wall_seconds": time.perf_counter() - started,
                       "input_shape": result_obj.input_shape, "output_shape": result_obj.output_shape,
                       "resize_scale": result_obj.resize_scale, "warnings": result_obj.warnings,
                       "adapter_metadata": result_obj.metadata},
+        "validation": {
+            "whole_cell_target": "marrow whole-cell instances",
+            "status": (
+                "not_validated"
+                if result_obj.metadata.get("whole_cell_validated") is False
+                else "not_assessed"
+            ),
+        },
         "environment": {"python": platform.python_version(), "platform": platform.platform(),
                         "numpy": np.__version__, "pillow": _version("Pillow"),
-                        "torch": _version("torch")},
+                        "torch": _version("torch"),
+                        "model_packages": {
+                            "patho-sam": _version("patho-sam"),
+                            "cellvit": _version("cellvit"),
+                            "cellSAM": _version("cellSAM"),
+                            "cellpose": _version("cellpose"),
+                            "segment-anything": _version("segment-anything"),
+                        }},
         "outputs": {"input.png": _sha256(destination / "input.png"),
                     "instance_mask.tif": _sha256(destination / "instance_mask.tif"),
                     "binary_mask.png": _sha256(destination / "binary_mask.png")},
     }
+    if instance_metadata_path is not None:
+        metadata["outputs"]["instances.json"] = _sha256(instance_metadata_path)
     (destination / "run.json").write_text(json.dumps(_jsonable(metadata), indent=2) + "\n", encoding="utf-8")
     (destination / "README.md").write_text(
         f"# {run_id}\n\n- Model: `{args.model}`\n- Tile: `{result_obj.tile_id}`\n"

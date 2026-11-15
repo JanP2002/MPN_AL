@@ -77,12 +77,16 @@ class PathoSAMAdapter(ModelAdapter):
             self.version,
             raw_output,
             request,
-            str(self._checkpoint) if self._checkpoint else None,
+            str(self._checkpoint) if self._checkpoint else "micro_sam:vit_b_histopathology",
             self._device,
             started,
             {
+                "upstream": "computational-cell-analytics/patho-sam",
+                "upstream_revision": "4b6b4fe32f7fc6b0b314c270f4b1f8ca1bcc3a64",
                 "model_type": self._model_type,
                 "weights": "custom checkpoint" if self._checkpoint else "PathoSAM built-in weights",
+                "cell_scope": "nucleus segmentation; not validated as whole-cell masks",
+                "whole_cell_validated": False,
                 "postprocessing": "nearest-neighbor resize; center crop context",
             },
         )
