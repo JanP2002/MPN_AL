@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,7 @@ from ..segmenter.postprocess import PostprocessConfig, hv_to_instances
 from ..training import TrainConfig, load_training_tiles, train_head
 from ..training.dataset import TrainingTile
 from .grid import RunConfig, load_grid
+from .viz import VizConfig, load_visualize, make_capture, select_viz_tiles, write_index
 
 logger = logging.getLogger("mpn_al.experiment")
 
@@ -91,8 +92,13 @@ def evaluate_tiles(
     work_mpp: float | None,
     amp: bool = True,
     max_size: int = 1024,
+    capture: Callable | None = None,
 ) -> list[dict]:
-    """Segment whole tiles and return, per tile, the counts behind PQ (overall and per class) and the correction effort."""
+    """Segment whole tiles and return, per tile, the counts behind PQ (overall and per class) and the correction effort.
+
+    ``capture(tile, maps, instances, instance_classes)``, if given, sees every tile's prediction (used to keep the
+    tiles that figures are drawn from); it cannot change the scores.
+    """
     num_classes = segmenter.labels.num_classes
     rows = []
     for tile in tiles:
@@ -100,6 +106,8 @@ def evaluate_tiles(
         predicted = hv_to_instances(maps.prob, maps.hv, mpp=work_mpp, config=PostprocessConfig())
         true_classes = instance_class_ids(tile.instances, tile.types)
         pred_classes = predicted_classes(predicted, maps.type_prob)
+        if capture is not None:
+            capture(tile, maps, predicted, pred_classes)
         rows.append(
             {
                 "tile_id": tile.tile_id,
@@ -146,8 +154,14 @@ def run_one(
     eval_splits: Sequence[str],
     device: torch.device,
     resamples: int = 1000,
+    viz: VizConfig = VizConfig(),
 ) -> dict:
-    """Train and evaluate one run. ``load(seg_mpp)`` returns all labelled tiles at that working resolution."""
+    """Train and evaluate one run. ``load(seg_mpp)`` returns all labelled tiles at that working resolution.
+
+    With ``viz.per_split > 0`` the predictions on a data-determined selection of tiles of every evaluated split are
+    kept in ``<out_dir>/viz`` (see ``experiment.viz``). The test split is only evaluated, hence only shown, in a
+    final run.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     by_split = dict(zip(split["tile_id"], split["split"]))
     patients = dict(zip(split["tile_id"], split["patient_id"]))
@@ -174,16 +188,24 @@ def run_one(
     train_seconds = time.perf_counter() - started
 
     summaries, counts_path = {}, out_dir / "tile_counts.jsonl"
+    viz_rows: list[dict] = []
     with open(counts_path, "w", encoding="utf-8") as handle:
         for name in eval_splits:
             selected = [t for t in tiles if by_split[t.tile_id] == name]
+            capture = None
+            if viz.per_split > 0:
+                chosen = select_viz_tiles(selected, patients, viz.per_split, viz.seed)
+                capture, split_rows = make_capture(out_dir / "viz", name, chosen, work_mpp)
+                viz_rows.append(split_rows)  # filled while the tiles are evaluated
             started = time.perf_counter()
-            rows = evaluate_tiles(segmenter, selected, work_mpp=work_mpp, amp=device.type == "cuda")
+            rows = evaluate_tiles(segmenter, selected, work_mpp=work_mpp, amp=device.type == "cuda", capture=capture)
             seconds = time.perf_counter() - started
             for row in rows:
                 handle.write(json.dumps({"split": name, "patient_id": patients[row["tile_id"]], **row}) + "\n")
             summaries[name] = summarize(rows, patients, resamples=resamples)
             summaries[name]["seconds_per_tile"] = seconds / max(len(rows), 1)
+    flat_rows = [row for rows in viz_rows for row in rows]
+    write_index(out_dir / "viz", flat_rows)
     result = {
         "run_id": config.run_id,
         "config": asdict(config),
@@ -193,6 +215,8 @@ def run_one(
         "metrics": summaries,
         "base_model": base.describe(),
     }
+    if flat_rows:
+        result["viz"] = {"tiles": len(flat_rows), "per_split": viz.per_split, "seed": viz.seed, "dir": "viz"}
     write_json(out_dir / "result.json", result)
     return result
 
@@ -213,6 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--random-init", action="store_true", help="random encoder weights (tests only)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--viz-per-split", type=int, help="tiles per evaluated split whose predictions are saved for figures "
+                        "(default: the grid file's visualize.per_split)")
+    parser.add_argument("--no-viz", action="store_true", help="save no predictions even if the grid file asks for them")
     parser.add_argument("--resamples", type=int, default=1000, help="bootstrap resamples over patients")
     return parser
 
@@ -260,8 +287,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = torch.device(args.device)
     base = build_base_model(config.model, pretrained=not args.random_init, device=device)
     logger.info("run %d of %d: %s (evaluating %s)", index, len(runs), config.run_id, eval_splits)
+    viz = load_visualize(args.grid)
+    if args.viz_per_split is not None:
+        viz = VizConfig(per_split=args.viz_per_split, seed=viz.seed)
+    if args.no_viz:
+        viz = VizConfig()
     result = run_one(config, base=base, schema=schema, split=split, load=load, out_dir=out_dir,
-                     eval_splits=eval_splits, device=device, resamples=args.resamples)
+                     eval_splits=eval_splits, device=device, resamples=args.resamples, viz=viz)
     write_json(out_dir / "provenance.json", run_provenance(vars(args), grid=name))
     for split_name, metrics in result["metrics"].items():
         logger.info("%s: PQ %.3f (95%% CI %.3f-%.3f over %d patients), mPQ %.3f",

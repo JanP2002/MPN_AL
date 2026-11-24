@@ -103,8 +103,13 @@ class Cluster:
         self.bin.mkdir()
         for name, body in STUBS.items():
             (self.bin / name).write_bytes(body.encode())
+            (self.bin / name).chmod(0o755)  # on Linux bash refuses to run a stub without the executable bit
         (self.home / ".bash_profile").write_text(
-            'export PATH="$FAKE_BIN:$PATH"\nexport SCRATCH="$FAKE_HOME/scratch"\n', encoding="utf-8"
+            # Runs after /etc/profile, which on a real cluster defines `module` and may set paths of its own.
+            'unset -f module ml 2>/dev/null\nexport SCRATCH="$FAKE_HOME/scratch"\n'
+            'export MPN_AL_VENV="$SCRATCH/mpn_al-venv" MPN_AL_RUNS="$SCRATCH/mpn_al_runs" MPN_AL_HF_HOME="$SCRATCH/hf-cache"\n'
+            'export PATH="$FAKE_BIN:$PATH"\n',
+            encoding="utf-8",
         )
         self.env_file.write_text(
             "# test settings\nPLG_HOST=cluster.invalid\nPLG_LOGIN=tester\nPLG_GRANT=grant-gpu\n"
@@ -124,7 +129,14 @@ class Cluster:
             os.environ.pop(name, None)
 
     def bash(self, *command, cwd=REPO, env=None):
-        environment = {**os.environ, **self.env, **(env or {})}
+        # Inside a real Slurm job the process inherits the real cluster setup (active venv, the `module` function,
+        # scratch paths); these would shadow the stubs, so the fake cluster starts from a clean environment.
+        inherited = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("BASH_FUNC_", "LMOD", "__LMOD", "_ModuleTable", "MPN_AL_", "SLURM_", "HF_", "VIRTUAL_ENV"))
+            and key not in ("PIP_CACHE_DIR", "SCRATCH")
+        }
+        environment = {**inherited, **self.env, **(env or {})}
         return subprocess.run(
             [BASH, *map(str, command)], cwd=cwd, env=environment, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=180,
@@ -279,6 +291,7 @@ def test_smoke_without_the_environment_says_what_to_do_first(cluster):
 def test_a_failed_smoke_test_fails_the_command(cluster):
     stub = cluster.bin / "sbatch"
     stub.write_bytes(stub.read_bytes().replace(b'{"ok": true}', b'{"ok": false}'))
+    stub.chmod(0o755)
     result = cluster.run("smoke")
     assert result.returncode != 0 and "SMOKE TEST FAILED" in result.stderr
 

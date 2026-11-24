@@ -64,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     tuning = parser.add_argument_group("inference settings")
     tuning.add_argument("--max-size", type=int, default=1024, help="largest side in px the segmenter sees in one pass")
     tuning.add_argument("--overlap", type=int, default=128, help="overlap in px between passes on larger images")
+    tuning.add_argument(
+        "--context-margin", type=int, default=0,
+        help="level-0 px of surroundings read around each tile (WSI tiles only, e.g. 128); the margin is segmented too "
+        "but only cells whose centroid lies in the tile are kept (see docs/architecture/model-input-report.md)",
+    )
     tuning.add_argument("--prob-threshold", type=float, default=0.5, help="cell probability threshold")
     tuning.add_argument("--min-area-um2", type=float, default=3.0, help="drop instances smaller than this")
     tuning.add_argument("--embed-mpp", type=float, default=0.5, help="with --baseline: resolution of the embedding pass")
@@ -78,7 +83,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (args.head is None) == (args.baseline is None):
         parser.error("give exactly one of --head and --baseline")
 
+    if args.context_margin < 0:
+        parser.error("--context-margin must be >= 0")
     source, tiles = source_from_arguments(args)
+    if args.context_margin and not source.supports_margin:
+        parser.error("--context-margin needs tiles read from slides (--tiles-parquet): image files hold only the tile itself")
     if not tiles:
         logger.info("shard %d of %d has no tiles: nothing to do", args.shard_index, args.num_shards)
         return 0
@@ -89,6 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         overlap=args.overlap,
         embed_mpp=args.embed_mpp,
         cell_embeddings=not args.no_cell_embeddings,
+        context_margin=args.context_margin,
         postprocess=PostprocessConfig(prob_threshold=args.prob_threshold, min_area_um2=args.min_area_um2),
     )
     head_info = None
@@ -141,7 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from tqdm import tqdm
 
-    loader = DataLoader(_TileDataset(source, tiles), batch_size=None, shuffle=False, num_workers=args.num_workers)
+    loader = DataLoader(_TileDataset(source, tiles, args.context_margin), batch_size=None, shuffle=False, num_workers=args.num_workers)
     n_cells, failed = 0, []
     started = time.perf_counter()
     for index, image in tqdm(loader, total=len(tiles), unit="tile"):
@@ -182,15 +192,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 class _TileDataset(Dataset):
     """Item ``i`` is ``(i, image)`` with the tile as a ``[H, W, 3]`` uint8 tensor."""
 
-    def __init__(self, source, tiles):
+    def __init__(self, source, tiles, margin: int = 0):
         self.source = source
         self.tiles = tiles
+        self.margin = margin
 
     def __len__(self) -> int:
         return len(self.tiles)
 
     def __getitem__(self, index: int):
-        return index, torch.from_numpy(self.source.read(self.tiles[index]).copy())
+        return index, torch.from_numpy(self.source.read_with_margin(self.tiles[index], self.margin).copy())
 
 
 def _sha256(path: Path) -> str:

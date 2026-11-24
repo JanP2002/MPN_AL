@@ -18,6 +18,7 @@ Outputs per run directory (``--out``, e.g. ``data/03_predictions/<round_id>``)::
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import time
@@ -75,6 +76,7 @@ class PipelineConfig:
     overlap: int = 128
     embed_mpp: float = 0.5  # stain baseline: resolution of the base-model pass that embeds the cells
     cell_embeddings: bool = True
+    context_margin: int = 0  # level-0 px of surroundings read around each tile; cells are kept by their centroid
     simplify: float = 0.75  # polygon tolerance in working pixels
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     baseline: StainBaselineConfig = field(default_factory=StainBaselineConfig)
@@ -90,6 +92,7 @@ class TileResult:
     scale: tuple[float, float]  # level-0 pixels per working pixel (x, y)
     mpp: float | None
     method: str
+    prob: np.ndarray | None = None  # cell probability at working resolution (head only)
 
 
 class SegmentationPipeline:
@@ -111,7 +114,57 @@ class SegmentationPipeline:
         self._warned_mpp = False
 
     def run_tile(self, image: np.ndarray, tile: TileRef) -> TileResult:
-        """Segment one RGB uint8 tile image."""
+        """Segment one RGB uint8 tile image.
+
+        With ``config.context_margin`` = M the image is the tile plus M px on every side
+        (``TileSource.read_with_margin``). The whole padded image is segmented, then only the cells
+        whose centroid lies inside the tile are kept, so tiles that abut never report a cell twice
+        and cells crossing the tile edge are whole. Their polygons are not clipped to the tile, and
+        ``touches_border`` then means "crosses the tile edge".
+        """
+        margin = self.config.context_margin
+        if margin <= 0:
+            return self._run(image, tile)
+        expected = (tile.height + 2 * margin, tile.width + 2 * margin)
+        if image.shape[:2] != expected:
+            raise ValueError(
+                f"tile {tile.tile_id}: expected the tile plus a {margin} px margin ({expected[1]}x{expected[0]} px), "
+                f"got {image.shape[1]}x{image.shape[0]} px"
+            )
+        padded = dataclasses.replace(tile, x=tile.x - margin, y=tile.y - margin, width=expected[1], height=expected[0])
+        return self._crop_to_tile(self._run(image, padded), tile, margin)
+
+    def _crop_to_tile(self, result: TileResult, tile: TileRef, margin: int) -> TileResult:
+        x0, y0, x1, y1 = tile.x, tile.y, tile.x + tile.width, tile.y + tile.height
+        keep = [
+            i for i, cell in enumerate(result.cells)
+            if x0 <= cell.centroid[0] < x1 and y0 <= cell.centroid[1] < y1
+        ]
+        cells = [result.cells[i] for i in keep]
+        for cell in cells:
+            lo, hi = cell.polygon.min(axis=0), cell.polygon.max(axis=0)
+            cell.touches_border = bool(lo[0] < x0 or lo[1] < y0 or hi[0] > x1 or hi[1] > y1)
+        embeddings = result.cell_embeddings[keep] if result.cell_embeddings is not None else None
+
+        sx, sy = result.scale
+        top, left = int(round(margin / sy)), int(round(margin / sx))
+        rows = slice(top, top + int(round(tile.height / sy)))
+        cols = slice(left, left + int(round(tile.width / sx)))
+        kept_labels = np.zeros(int(result.instances.max()) + 1, dtype=bool)
+        kept_labels[[cell.label for cell in cells]] = True
+        instances = np.where(kept_labels[result.instances], result.instances, 0)[rows, cols]
+        prob = result.prob[rows, cols] if result.prob is not None else None
+        return dataclasses.replace(
+            result,
+            tile=tile,
+            cells=cells,
+            cell_embeddings=embeddings,
+            instances=instances,
+            prob=prob,
+            stats=tile_statistics(cells, instances, prob),
+        )
+
+    def _run(self, image: np.ndarray, tile: TileRef) -> TileResult:
         config = self.config
         mpp = tile.mpp if tile.mpp is not None else config.default_mpp
         embeddings = None
@@ -149,6 +202,7 @@ class SegmentationPipeline:
             scale=scale,
             mpp=mpp,
             method=self.method,
+            prob=prob,
         )
 
     def _cells(self, instances, scale, tile, prob, type_prob) -> list[Cell]:

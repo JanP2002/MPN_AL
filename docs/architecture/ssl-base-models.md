@@ -266,7 +266,8 @@ z adresem PWr jako głównym) i loguje się własnym tokenem na klastrze. Narzę
 `HF_HOME` i ładuje je offline ([plgrid.md](plgrid.md), sekcja 3). Kryterium: `--verify` kończy
 się `verified` dla każdego modelu.
 
-**Krok 13. Weryfikacja na GPU.** Narzędzie jest gotowe, ale **niewykonane na Atenie**:
+**Krok 13. Weryfikacja na GPU.** **Wykonane 20.11.2026 dla `lunit-dino-s16` i `phikon-v2`** (wyniki w
+sekcji 10, "Athena"); do powtórzenia dla pozostałych modeli po pobraniu wag. Polecenie:
 `bash scripts/plgrid/remote.sh smoke --models lunit-dino-s16 phikon-v2`. Zleca job A100,
 który na danych syntetycznych sprawdza dla każdego modelu ładowanie offline, przebiegi enkodera
 w float32 i float16, embeddingi, trening głowicy z autocastem, segmentację i spójność wyników,
@@ -441,6 +442,64 @@ Te same trzy obrazy, CPU, offline z cache.
   porównywać z tabelą wyżej i nie rozstrzygają one, który enkoder jest lepszy. To wymaga
   prawdziwych anotacji (krok 16).
 
+### Athena, GPU (20.11.2026)
+
+`remote.sh smoke`, job 3565487, NVIDIA A100-SXM4-40GB, torch 2.14.1 (CUDA 13.0), sterownik 595.91,
+dane syntetyczne (kafle 1024 px, 100 komórek). Wynik: PASS dla obu modeli, 117 testów jednostkowych
+na węźle przechodzi. Liczby są prawdziwe dla czasu i pamięci. Jakość segmentacji (PQ 0,998 na syntetycznych
+kołach) nie mówi nic o histologii.
+
+| | `lunit-dino-s16` (ViT-S/16) | `phikon-v2` (ViT-L/16) |
+|---|---|---|
+| enkoder, 224 px, fp32 / fp16 | 4,5 / 6,1 ms | 19,8 / 15,4 ms |
+| enkoder, 1024 px (4096 tokenów), fp32 / fp16 | 31 / 6,0 ms | 233 / 33 ms |
+| zgodność embeddingu fp16 z fp32 (cosinus) | 1,0 | 1,0 |
+| embeddingi kafli | 249 okien/s | 264 okien/s |
+| trening głowicy, 60 kroków | 6,7 s, 2,3 GB | 6,9 s, 3,5 GB |
+| segmentacja kafla 1024 px (0,25 µm/px) | 0,40 s, 1,2 GB | 0,47 s, 2,4 GB |
+| to samo przy 0,5 µm/px | 0,12 s | 0,13 s |
+
+Wnioski: float16 nie zmienia embeddingów i przy 1024 px daje siedmiokrotne przyspieszenie ViT-L, więc
+autocast zostaje włączony. Przy małych wejściach czas wąskiego gardła to narzut (stałe ok. 6 ms dla ViT-S),
+a w segmentacji i treningu dominuje dekoder, nie enkoder, co potwierdza decyzję o braku cache cech. Pamięć nie
+jest ograniczeniem dla tych modeli; ViT-g wymaga osobnego pomiaru.
+
+### Athena, ViT-g i odniesienie ogólne (21.11.2026)
+
+`remote.sh smoke --models midnight-12k dinov2-s14`, job 3567598, ta sama A100-40GB; PASS i 117 testów
+jednostkowych na węźle. `midnight-12k` to ViT-g/14 (1,14 mld parametrów, 1536-d, 40 bloków, MIT, pobranie
+bez bramki, 4,23 GB). Embedding kafla ma 3072 wymiary (`cls+mean`).
+
+| | `midnight-12k` (ViT-g/14) | `dinov2-s14` (ViT-S/14) |
+|---|---|---|
+| enkoder, 224 px, fp32 / fp16 | 50,7 / 29,3 ms | 5,2 / 6,8 ms |
+| enkoder, 1022 px (5329 tokenów), fp32 / fp16 | 1014 / 136 ms | 43 / 8,7 ms |
+| pamięć enkodera przy 1022 px, fp32 / fp16 | 4,6 / 4,5 GB | 0,21 / 0,18 GB |
+| zgodność fp16 z fp32 (cosinus) | 1,0 | 1,0 |
+| embeddingi kafli | 45 okien/s | 348 okien/s |
+| trening głowicy, 60 kroków | 9,6 s, 6,7 GB | 6,2 s, 2,3 GB |
+| segmentacja kafla 1024 px / przy 0,5 µm/px | 0,66 s / 0,16 s | 0,41 s / 0,12 s |
+
+Wnioski: ViT-g mieści się w 40 GB z dużym zapasem (do 7 GB w treningu głowicy), a float16 przyspiesza go
+7,5-krotnie przy 1022 px bez zmiany embeddingów. Embeddingi okien są 8 razy wolniejsze niż dla ViT-S, ale całej
+puli kafli to nadal minuty. Wątpliwość z poprzedniej wersji dokumentu ("ViT-g wymaga osobnego pomiaru") jest
+zamknięta dla `midnight-12k`; `h-optimus-0/1` to ten sam rząd wielkości (1,1 mld parametrów), ale nie były
+pobrane.
+
+### Athena, prawdziwe obrazy (20.11.2026)
+
+Embeddingi `phikon-v2` dla wszystkich 204 obrazów tkankowych BaMBo (47 pacjentów, 493 MB, przyjęte
+0,5 µm/px, okna 224 px): tablica 8 zadań na A100 (job 3565874), każde zadanie 11–29 s łącznie z kolejką i
+ładowaniem modelu, samo liczenie 25–26 obrazów 5–9 s. Razem 8483 okien, scalony `embeddings.parquet` ma 204 wiersze
+po 1024 wymiary. To pierwszy przebieg na prawdziwych obrazach i w prawdziwej skali pętli: przepustowość
+nie jest ograniczeniem, a koszt embeddingów całej puli kafli to minuty.
+
+Embeddingi kafli niosą tylko słaby sygnał pacjenta: najbliższy sąsiad pochodzi od tego samego pacjenta w 7,4%
+przypadków (przypadkowo 2,2%), a k-means na 47 grup daje ARI 0,025. Przy kilku obrazach na pacjenta i
+nieznanej skali obrazów to tylko wskazówka, ale dobrze to wygląda dla selektora: embeddingi kafla nie są
+zdominowane przez tożsamość preparatu tak jak embeddingi pojedynczych komórek (95–100% wg obrazu w sekcji
+wyżej), więc nadają się do wyboru różnorodnych kafli bez centrowania.
+
 ## 11. Czego jeszcze nie sprawdzono
 
 - Duże modele bramkowane (UNI2-h, H-optimus, Virchow2): nie były pobierane. Ich ścieżki kodu
@@ -448,12 +507,12 @@ Te same trzy obrazy, CPU, offline z cache.
   cechach konstrukcyjnych, a argumenty konstruktorów pochodzą z kart modeli. Backend
   `transformers` sprawdzono na Phikon-v2; `midnight-12k` (normalizacja 0,5) i `hibou-l`
   (`trust_remote_code`) nie były ładowane.
-- Ścieżka GPU z autocastem float16 nie była uruchamiana. Pierwszy przebieg to `remote.sh smoke`
-  (krok 13).
-- Czytanie kafli z WSI przetestowano na atrapie interfejsu OpenSlide, nie na pliku NDPI.
-- Skrypty PLGrid (`remote.sh`, zadania Slurm, `setup`, `smoke`) są przetestowane na atrapie
-  klastra i na CPU, a nie na Atenie. Atrapa pokazuje, że logika skryptów jest poprawna, ale nie
-  to, że klaster zachowuje się tak, jak zakładają atrapy: instalacja pakietów, moduły, kolejka,
-  wersja torch względem sterownika i uprawnienia konta/partycji wyjdą dopiero na klastrze.
+- Ścieżka GPU z float16 jest sprawdzona na A100 dla `lunit-dino-s16`, `phikon-v2`, `midnight-12k` (ViT-g) i
+  `dinov2-s14` (sekcja 10). Nie sprawdzono modeli bramkowanych (czeka na token HF), ani innych kart.
+- Czytanie kafli z WSI przetestowano na atrapie interfejsu OpenSlide, nie na pliku NDPI
+  (`openslide` jest zainstalowany na klastrze).
+- Skrypty PLGrid: `sync`, `setup`, `download`, `smoke`, `put`, `submit --array`, `run` i `fetch`
+  działają na Atenie (tablice 4 zadań, szczegóły w [plgrid.md](plgrid.md)). Nie sprawdzono
+  `put`/`fetch` większych danych ani tablic z modelami o dużej pamięci.
 - Jakość segmentacji względem anotacji lekarza: nie ma jeszcze żadnej liczby, w szczególności
   dla megakariocytów.

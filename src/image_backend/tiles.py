@@ -94,6 +94,19 @@ class TileSource(ABC):
     def read(self, tile: TileRef) -> np.ndarray:
         """Return the tile as RGB ``uint8`` ``[height, width, 3]`` at level-0 resolution."""
 
+    supports_margin = False  # True when pixels around a tile can be read too (``read_with_margin``)
+
+    def read_with_margin(self, tile: TileRef, margin: int) -> np.ndarray:
+        """The tile plus ``margin`` level-0 px of surroundings on every side, ``[h + 2m, w + 2m, 3]``.
+
+        Only sources that read from a whole slide can do this; the tile's own pixels sit at ``[margin:-margin]``.
+        """
+        if margin == 0:
+            return self.read(tile)
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot read around a tile; use --tiles-parquet (WSI) for a context margin"
+        )
+
     def __len__(self) -> int:
         return len(self.tiles)
 
@@ -251,6 +264,18 @@ class WsiTileSource(TileSource):
         slide = self._slide(tile.path)
         region = slide.read_region((tile.x, tile.y), 0, (tile.width, tile.height))
         return _composite_on_white(region)
+
+    supports_margin = True
+
+    def read_with_margin(self, tile: TileRef, margin: int) -> np.ndarray:
+        """Surroundings outside the scanned area (or the slide) come back white, as in :meth:`read`."""
+        if margin < 0:
+            raise ValueError(f"margin must be >= 0, got {margin}")
+        if tile.path is None:
+            raise FileNotFoundError(f"no WSI file known for slide {tile.slide_id!r}; pass slides_parquet or wsi_root")
+        slide = self._slide(tile.path)
+        size = (tile.width + 2 * margin, tile.height + 2 * margin)
+        return _composite_on_white(slide.read_region((tile.x - margin, tile.y - margin), 0, size))
 
     def _slide(self, path: str) -> Any:
         if path in self._open:

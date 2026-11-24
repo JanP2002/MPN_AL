@@ -9,10 +9,23 @@ uruchamianym **z Twojej maszyny**.
 - **Przetestowane lokalnie:** logika skryptów (przesyłanie kodu, cytowanie argumentów, opcje tablic zadań,
   czekanie na job, pobieranie wyników) na atrapie klastra (`tests/test_plgrid_scripts.py`), narzędzia
   Pythona (shardy, scalanie, pobieranie wag z atrapą Hugging Face) i test dymny na CPU.
-- **Nieuruchomione na Atenie:** żaden z poniższych kroków nie został wykonany na prawdziwym klastrze.
-  Instalacja pakietów, ładowanie modułów, kolejka Slurm, ścieżka GPU z float16 i zgodność wersji torch
-  ze sterownikiem węzłów są sprawdzane dopiero przez `remote.sh smoke` (sekcja 2). Do tego czasu nic z tego
-  nie jest potwierdzone.
+- **Wykonane na Atenie (20.11.2026):** `sync`, `setup`, `download phikon-v2 lunit-dino-s16 --verify` i
+  `smoke` na A100-SXM4-40GB (job 3565487): test dymny PASS dla obu modeli, a 117 testów jednostkowych
+  przechodzi na węźle. Zgodność torch 2.14.1 (CUDA 13.0) ze sterownikiem 595.91, ścieżka float16 i
+  kolejka Slurm (partycja i grant z `.env`) działają. Nie sprawdzono: modeli bramkowanych, odczytu WSI
+  z pliku NDPI i uruchomienia na prawdziwych danych.
+- **Runner eksperymentu na A100 (20.11.2026):** `configs/experiments/demo.yaml` (2 modele × 2 odsetki × 2 seedy,
+  dane syntetyczne, plik podziału po 4 pacjentach), `submit --array=0-7 scripts/run_experiment.py ... --final`
+  (job 3565807): 8 zadań w 17–22 s. `summarize_experiment.py` zebrał je na klastrze dla walidacji i testu
+  (PQ 0,84–0,89, bez znaczenia dla histologii). Ponowne zlecenie z `--skip-existing` (job 3565835) nie przeliczyło
+  niczego: znaczniki czasu wszystkich `result.json` bez zmian. Zbiór testowy był liczony tylko z `--final`.
+- **Tablice zadań (20.11.2026):** `put` danych demo (8 kafli), potem `submit --array=0-3` dla
+  `extract_embeddings.py` (job 3565519) i `segment_cells.py --baseline stain` (job 3565521): wszystkie 8 zadań
+  zakończyło się w 7–17 s. `merge_shards.py` scalił 4 shardy (8 wierszy). Sprawdzone względem przebiegu
+  jednorazowego na CPU: każdy kafel występuje raz, shard i zawiera kafle i, i+4, embeddingi z GPU i CPU są
+  zgodne (cosinus 1,000000), liczby komórek identyczne (8 × 12), 8 plików GeoJSON i 96 wierszy tabeli komórek.
+- Pierwsze próby `smoke` wykryły błędy w samych testach na Linuksie (atrapy bez bitu wykonywalnego,
+  dziedziczenie środowiska zadania przez atrapę klastra); poprawione, na klastrze 117 przechodzi.
 - Fakty o Atenie (limity, moduły, internet) pochodzą z rozpoznania z 9.08.2026 opisanego w
   `AL_System/docs/phase5_plgrid_launcher.md` i nie były tu sprawdzane ponownie.
 
