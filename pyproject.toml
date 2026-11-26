@@ -27,6 +27,8 @@ dependencies = [
 hf = ["transformers>=4.44"]
 # Reading tiles straight from WSIs listed in tiles.parquet.
 wsi = ["openslide-python>=1.4", "openslide-bin>=4.0"]
+# Figures of the clustering (curves, maps): matplotlib; UMAP maps need umap-learn (else t-SNE is used).
+viz = ["matplotlib>=3.8", "umap-learn>=0.5"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

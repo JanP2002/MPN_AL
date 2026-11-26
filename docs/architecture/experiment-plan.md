@@ -65,6 +65,8 @@ dominuje koszt, można trenować z cache bez augmentacji fotometrycznej i porów
 
 ## Wynik eksperymentu zastępczego na BaMBo (21.11.2026)
 
+> **Uwaga (25.11.2026):** 28 z 204 obrazów ma zepsute pseudo-etykiety (patrz sekcja o wadzie pseudo-etykiet niżej); liczby w tej sekcji je zawierają.
+
 **Co to jest:** `configs/experiments/bambo_proxy.yaml`, 204 obrazy BaMBo, 47 pacjentów (podział losowy po
 pacjentach: 30 trening / 8 walidacja / 9 test, ziarno 0), etykiety to **maski jąder z baseline'u barwnikowego**,
 nie anotacje lekarza. 4 modele otwarte × 4 odsetki obrazów (10–100%) × 3 seedy = 48 przebiegów na A100 (job
@@ -127,7 +129,8 @@ Plan wizualizacji wyników każdego modelu na obrazach: najpierw przebieg zapisu
 - **Zawartość `<przebieg>/viz/<zbiór>/<tile_id>.npz`:** mapa instancji, prawdopodobieństwo (uint8), HV (int8), PCA tokenów w rozdzielczości siatki
   tokenów (uint8), klasy instancji oraz referencja i maska `ignore`, względem których liczono wynik. Test sprawdza, że TP, FP i FN policzone z tego pliku
   są równe zliczeniom w `tile_counts.jsonl`, więc figura nie może się rozjechać z tabelą.
-- **Koszt:** kilkanaście kafli na przebieg, kilkaset kB na kafel w formie skompresowanej; PCA liczone z macierzy kowariancji D × D (ok. 1 s dla ViT-g).
+- **Koszt (zmierzony 25.11.2026 na BaMBo, obrazy do 1920 × 1200):** ok. 3,4 MB na kafel, 3,0 GB na 48 przebiegów × 18 kafli; razem z głowicami (4,5 GB) katalog siatki ma ok. 7 GB.
+  Wcześniejszy szacunek „kilkaset kB na kafel” był zaniżony. PCA liczone z macierzy kowariancji D × D (ok. 1 s dla ViT-g).
   `bambo_proxy.yaml` ma teraz `per_split: 9`; ta sekcja nie wpływa na żadną metrykę.
 
 ### Figury z zapisanych predykcji (`scripts/visualize_experiment.py`)
@@ -146,6 +149,66 @@ wszystkich seedów i miejsca niezgodności), `_disagreement.png` (ile modeli uzn
 - Skrypt nie potrzebuje GPU ani enkodera; wystarczą zapisane `viz/` i katalog z obrazami (obraz jest skalowany do rozdzielczości roboczej predykcji).
 - Teksty na figurach są po angielsku i bez polskich znaków (OpenCV); strona `index.html` jest po angielsku.
 - **Uwaga do `_seeds.png` i `_curve.png`:** pojawiają się tylko wtedy, gdy siatka ma więcej niż jeden seed lub odsetek.
+
+## Siatka BaMBo z zapisem predykcji i wada pseudo-etykiet (25.11.2026)
+
+**Przebieg.** Tablica 3578584 (48 zadań, `--final`, `visualize: per_split: 9`) zakończona w całości: 48 × `result.json`, 48 × `viz/index.csv`, 864 zapisane predykcje
+(`outputs/plgrid/exp_bambo_viz/`, ok. 7 GB). **PQ identyczne z `exp_bambo_final` w 48 z 48 przebiegów** (największa różnica 0,0), więc zapis predykcji nie zmienia metryk.
+Figury: `outputs/figures/bambo_validation/` i `outputs/figures/bambo_test/` (po 45 obrazów i `index.html`); `matches_counts` = True we wszystkich 432 wierszach obu zbiorów.
+
+**Znaleziona wada: pseudo-etykiety są zepsute na części obrazów.** Na obrazach z małą liczbą jąder (tłuszcz, kość) i na części obrazów 512 × 512 baseline barwnikowy
+zaznacza jako „komórki” ogromne obszary (nawet 87% obrazu; na figurach referencja to proste, rozchodzące się linie). Przyczyna: `segment_nuclei_stain` dzieli piksele tkanki
+progiem Otsu bez minimalnego poziomu hematoksyliny, więc gdy na obrazie prawie nie ma jąder, dzieli szum.
+
+Kryterium „podejrzany” (dobrane **po** obejrzeniu figur): pierwszy plan > 30% obrazu albo > 5% obrazu w obiektach większych niż 500 µm². Spełnia je **28 z 204 obrazów**:
+16 z 130 treningowych, 2 z 32 walidacyjnych, **10 z 41 testowych**.
+
+PQ przy 100% kafli treningowych, średnia z 3 seedów (analiza wrażliwości, **nie zastępuje** liczb wyżej):
+
+| model | test, wszystkie | test bez podejrzanych | tylko podejrzane (test) | walidacja bez podejrzanych |
+|---|---|---|---|---|
+| `lunit-dino-s16` | 0,547 | 0,594 | 0,291 | 0,630 |
+| `phikon-v2` | 0,539 | 0,582 | 0,296 | 0,629 |
+| `midnight-12k` | 0,521 | 0,573 | 0,233 | 0,613 |
+| `dinov2-s14` | 0,490 | 0,551 | 0,186 | 0,606 |
+
+- **Ranking się nie zmienia** (`lunit` ≥ `phikon` > `midnight` > `dinov2`), ale odstęp `dinov2` od reszty na teście maleje.
+- **Różnica walidacja–test** (wcześniej niewyjaśniona, ok. 0,1) w dużej części wynika z częstszych zepsutych etykiet na teście: bez nich zostaje ok. 0,03–0,05.
+- **Czego ta analiza nie naprawia:** 16 zepsutych obrazów było w treningu, więc głowice uczyły się na błędnych etykietach; wyłączenie ich z oceny tego nie cofa. Kryterium
+  dobrano po fakcie i nie sprawdzono go ręcznie na wszystkich 28 obrazach (obejrzano kilka).
+- **Decyzja do podjęcia:** dodać do baseline'u minimalny poziom hematoksyliny (albo odrzucać takie obrazy), wygenerować pseudo-etykiety od nowa i powtórzyć siatkę.
+  Zmienia to dane eksperymentu, więc nie zrobiono tego bez zgody. Przy prawdziwych anotacjach problem znika.
+
+**Inne obserwacje z figur** (9 kafli na zbiór, wybranych z danych; wnioski jakościowe z obejrzanych kilku kafli):
+- Na gęstym kaflu walidacyjnym (`PGI_15__PGI_image_17`, powiększenie) błędy to głównie pominięte małe jądra; cztery modele wyglądają bardzo podobnie (PQ 0,67–0,71).
+- Na obrazie z samym tłuszczem (`PGI_5__PGI_image_148`) wszystkie modele zawodzą, a prawdopodobieństwo komórki jest wysokie na pustym tle. To skutek (a przynajmniej zbieżność) treningu na etykietach tego typu.
+- Na 9 kaflach walidacyjnych, średnio po seedach, więcej kafli treningowych daje więcej fałszywych alarmów i mniej pominięć; PQ jest prawie płaskie (`lunit`, `phikon`) lub lekko spada (`dinov2`).
+  Na całym zbiorze walidacyjnym `lunit` i `phikon` lekko rosną, `dinov2` stoi w miejscu.
+
+## Poprawka pseudo-etykiet i powtórka siatki (25.11.2026)
+
+**Przyczyna.** Tło skanów BaMBo jest jasnoszare, a baseline barwnikowy liczył gęstość optyczną względem czystej bieli (255). Maska tkanki obejmowała więc prawie cały obraz
+(także szkło) i na obrazach z małą liczbą jąder próg Otsu dzielił szum tła.
+
+**Poprawka** (`segmenter/stain_baseline.py`): gęstość optyczna jest liczona względem tła danego obrazu (99. percentyl kanałów, nie niżej niż 180), ale **tylko gdy ten kolor
+jest prawie neutralny** (rozrzut R/G/B ≤ 25), czyli wygląda jak szkło; w polu wypełnionym tkanką najjaśniejszy kolor to różowa cytoplazma i nie może zostać „bielą”.
+`white_balance=False` przywraca dawne zachowanie. Odrzuciłem prostszy próg minimalny barwnika: na bladych obrazach kasował prawdziwe jądra.
+
+**Skutek na etykietach** (204 obrazy, to samo kryterium podejrzenia co wyżej):
+
+| | przed | po |
+|---|---|---|
+| obrazy podejrzane | 28 (trening 16, walidacja 2, test 10) | **11** (trening 8, walidacja 1, test 2) |
+| obrazy wcześniej dobre, które stały się podejrzane | — | 0 |
+| pierwszy plan na dobrych obrazach (mediana nowy/stary) | — | 0,96; 3 straciły ponad połowę (obejrzane: znikają fałszywe obrysy na szkle i kości) |
+
+Pozostałe 11 to w większości obrazy 512 × 512 o różowym zabarwieniu tła, na których baseline zawodzi niezależnie od poprawki. **Wyłączono je z eksperymentu**
+(`outputs/bambo_split_v2.csv`, lista w `outputs/bambo_excluded_v2.txt`); kryterium (pierwszy plan > 30% albo > 5% obrazu w obiektach > 500 µm²) dotyczy tylko etykiet,
+nie wyników modeli, ale zostało dobrane po obejrzeniu figur. Podział po zmianie: trening 122, walidacja 32, test 39 obrazów; liczba pacjentów w każdym zbiorze bez zmian.
+Tam, gdzie algorytm się nie zmienił, etykiety wygenerowane lokalnie są identyczne piksel w piksel ze starymi z klastra.
+
+**Powtórka siatki:** job 3581464 (48 zadań, `--final`, maski `bambo_masks_wb/masks`, wyniki `exp_bambo_v2`). **Job anulowany 25.11.2026 przed startem** (na polecenie, razem z całą kolejką), więc wyników nie ma i trzeba go zgłosić od nowa; dane (maski, podział) są na klastrze. Liczb z tej powtórki
+nie wolno porównywać wprost ze starymi: inne etykiety i inny skład zbiorów.
 
 ## Czego jeszcze brakuje
 

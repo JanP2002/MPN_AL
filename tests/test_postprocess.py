@@ -20,6 +20,7 @@ from mpn_al.segmenter import (
     tile_statistics,
     write_geojson,
 )
+from mpn_al.segmenter.stain_baseline import StainBaselineConfig, background_colour, haematoxylin
 from mpn_al.training import hv_maps, rasterize_annotations
 
 TWO_CLASSES = LabelSchema.from_dict(
@@ -136,6 +137,59 @@ def test_stain_baseline_finds_the_nuclei_of_a_synthetic_tile():
     score = panoptic_quality(truth, found)
     assert score["dq"] > 0.9 and score["sq"] > 0.8, score
     assert segment_nuclei_stain(np.full((64, 64, 3), 245, np.uint8), mpp=0.25).max() == 0  # empty glass
+
+
+def _grey_slide(seed=0, nuclei=6):
+    """Light grey scanned glass with noise, a pink eosinophilic strip ("bone") and a few dark nuclei."""
+    rng = np.random.default_rng(seed)
+    image = np.clip(rng.normal((206, 204, 199), 3, size=(256, 256, 3)), 0, 255)
+    image[:, 180:215] = np.clip(rng.normal((215, 140, 185), 4, size=(256, 35, 3)), 0, 255)
+    yy, xx = np.mgrid[:256, :256]
+    centres = [(40, 40), (40, 120), (120, 60), (130, 130), (200, 40), (210, 120)][:nuclei]
+    for cy, cx in centres:
+        image[(yy - cy) ** 2 + (xx - cx) ** 2 <= 81] = (80, 50, 120)
+    return image.astype(np.uint8), centres
+
+
+def test_grey_glass_does_not_become_huge_cells():
+    image, centres = _grey_slide()
+    found = segment_nuclei_stain(image, mpp=0.5)
+    assert (found > 0).mean() < 0.12  # the nuclei and at most the strip's edge, not the background
+    assert sum(found[cy, cx] > 0 for cy, cx in centres) == len(centres)
+    areas = np.bincount(found.ravel())[1:]
+    assert areas.max() * 0.25 < 500  # um^2: nothing larger than a very large nucleus
+    empty_glass = _grey_slide(nuclei=0)[0][:, :170]
+    assert (segment_nuclei_stain(empty_glass, mpp=0.5) > 0).mean() < 0.01
+    old = segment_nuclei_stain(empty_glass, mpp=0.5, config=StainBaselineConfig(white_balance=False))
+    assert (old > 0).mean() > 0.2  # the failure that white balance removes
+
+
+def test_pale_staining_keeps_its_nuclei():
+    rng = np.random.default_rng(1)
+    image = np.clip(rng.normal((238, 205, 215), 3, size=(256, 256, 3)), 0, 255)  # pale cytoplasm
+    image[:, :60] = np.clip(rng.normal((240, 238, 236), 2, size=(256, 60, 3)), 0, 255)  # a clear area
+    yy, xx = np.mgrid[:256, :256]
+    centres = [(40, 100), (40, 180), (120, 130), (130, 220), (200, 100), (210, 190)]
+    for cy, cx in centres:
+        image[(yy - cy) ** 2 + (xx - cx) ** 2 <= 81] = (205, 140, 185)  # weakly stained nucleus
+    found = segment_nuclei_stain(image.astype(np.uint8), mpp=0.5)
+    assert sum(found[cy, cx] > 0 for cy, cx in centres) >= len(centres) - 1
+    assert (found[:, :60] > 0).mean() < 0.02
+
+
+def test_a_field_without_glass_is_not_white_balanced():
+    image, _ = synthetic_cells(size=256, count=14, seed=0)  # pink tissue everywhere: no neutral bright colour
+    with_balance = segment_nuclei_stain(image, mpp=0.25)
+    without = segment_nuclei_stain(image, mpp=0.25, config=StainBaselineConfig(white_balance=False))
+    assert np.array_equal(with_balance, without)
+
+
+def test_background_colour_is_bounded_and_default_matches_pure_white():
+    dark = np.full((32, 32, 3), 100, np.uint8)
+    assert np.allclose(background_colour(dark), 180.0)
+    image = np.random.default_rng(0).integers(0, 255, (16, 16, 3), dtype=np.uint8)
+    for a, b in zip(haematoxylin(image), haematoxylin(image, np.array([255.0, 255.0, 255.0]))):
+        assert np.allclose(a, b)
 
 
 def test_cell_embedding_is_the_overlap_weighted_mean_of_its_tokens():
