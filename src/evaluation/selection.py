@@ -163,12 +163,21 @@ def spatial_selection(positions: np.ndarray, k: int, rng: np.random.Generator, c
 # ---- scores -----------------------------------------------------------------------------------
 
 
+def nearest_distance(descriptors: np.ndarray, chosen: np.ndarray) -> np.ndarray:
+    """For every row of ``descriptors``: the Euclidean distance to the nearest row of ``chosen``."""
+    squared = (descriptors**2).sum(axis=1)[:, None] + (chosen**2).sum(axis=1)[None, :] - 2.0 * descriptors @ chosen.T
+    return np.sqrt(np.clip(squared.min(axis=1), 0.0, None))
+
+
+def coverage_on(descriptors: np.ndarray, chosen: np.ndarray) -> tuple[float, float]:
+    """Mean and 95th percentile of :func:`nearest_distance` (lower = better)."""
+    nearest = nearest_distance(descriptors, chosen)
+    return float(nearest.mean()), float(np.percentile(nearest, 95))
+
+
 def coverage(descriptors: np.ndarray, selected: np.ndarray) -> tuple[float, float]:
     """Mean and 95th percentile, over all tiles, of the distance to the nearest selected tile (lower = better)."""
-    chosen = descriptors[selected]
-    squared = (descriptors**2).sum(axis=1)[:, None] + (chosen**2).sum(axis=1)[None, :] - 2.0 * descriptors @ chosen.T
-    nearest = np.sqrt(np.clip(squared.min(axis=1), 0.0, None))
-    return float(nearest.mean()), float(np.percentile(nearest, 95))
+    return coverage_on(descriptors, descriptors[selected])
 
 
 def rare_flags(table: pd.DataFrame, features: Sequence[str], share: float = 0.05) -> np.ndarray:
